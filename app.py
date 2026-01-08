@@ -230,6 +230,21 @@ else:
                 k3.metric("次日留存 (Next Day Retention)", f"{avg_retention:.1f}%", help="前一天活跃用户在第二天继续活跃的比例")
                 k4.metric("人均局数 (Spins/User)", f"{spins_per_user:.0f}", help="总局数 / 总玩家数")
                 k5.metric("总玩家数 (Total Users)", f"{total_users}")
+
+                # --- 新增：大户累计下注统计 ---
+                st.markdown("### 💎 累计下注用户分布 (Cumulative Bet Analysis)")
+                
+                # 计算每个用户的总下注(绝对值)
+                user_cum_bet = bet_df.groupby('user_id')['amount'].sum().abs()
+                
+                # 定义档位 (1万, 10万... 200万)
+                thresholds = [10000, 100000, 200000, 500000, 1000000, 2000000]
+                t_cols = st.columns(len(thresholds))
+                
+                for idx, t in enumerate(thresholds):
+                    count = (user_cum_bet >= t).sum()
+                    label = f"≥ {int(t/10000)}万"
+                    t_cols[idx].metric(label, f"{count} 人", help=f"累计下注超过 {t:,} 的玩家数量")
                 
                 # DAU Chart
                 fig_dau = px.bar(dau_series, title="每日活跃用户趋势 (DAU Trend)", labels={'value': 'DAU (活跃人数)', 'date_str': '日期 (Date)'})
@@ -381,74 +396,73 @@ else:
                 
                 st.markdown("### ⏱️ 玩家盈亏演变 (PnL Evolution)")
                 
-                sorted_df = filtered_df.sort_values('create_date')
+                # 优化: 仅取需要的列排序
+                sorted_df = filtered_df[['create_date', 'user_id', 'amount']].sort_values('create_date')
                 min_time = sorted_df['create_date'].min()
                 max_time = sorted_df['create_date'].max()
-                
-                if 'current_time_index' not in st.session_state:
-                    st.session_state.current_time_index = 0
-                if 'is_playing' not in st.session_state:
-                    st.session_state.is_playing = False
                 
                 time_steps = []
                 if min_time != max_time:
                     time_steps = pd.date_range(start=min_time, end=max_time, periods=100).to_pydatetime()
+                else:
+                    time_steps = [min_time]
+
+                # 状态初始化: 默认展示最终结果 (Index at end)
+                if 'current_time_index' not in st.session_state:
+                    st.session_state.current_time_index = len(time_steps) - 1
+                if 'is_playing' not in st.session_state:
+                    st.session_state.is_playing = False
+
+                # Limit time index bounds
+                if st.session_state.current_time_index >= len(time_steps):
+                     st.session_state.current_time_index = len(time_steps) - 1
                 
+                # 计算全量数据的范围，保持坐标轴固定
+                max_bet_all = total_turnover * 0.1 if total_turnover > 0 else 1000
+                min_pnl_all = 0
+                max_pnl_all = 0
+                if not sorted_df.empty:
+                    final_user_agg = sorted_df.groupby('user_id')['amount'].agg(
+                        cum_bet=lambda x: abs(x[x < 0].sum()),
+                        cum_pnl='sum'
+                    )
+                    if not final_user_agg.empty:
+                        max_bet_all = final_user_agg['cum_bet'].max() * 1.1
+                        min_pnl_all = final_user_agg['cum_pnl'].min() * 1.1
+                        max_pnl_all = final_user_agg['cum_pnl'].max() * 1.1
+
                 col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 2, 4])
                 
                 with col_ctrl1:
                     play_btn = st.button("▶️ 播放 / ⏸️ 暂停" if not st.session_state.is_playing else "⏸️ 暂停 / ▶️ 播放")
                     if play_btn:
                         st.session_state.is_playing = not st.session_state.is_playing
-                
+                        # If at end, restart
+                        if st.session_state.is_playing and st.session_state.current_time_index >= len(time_steps) - 1:
+                            st.session_state.current_time_index = 0
+
                 with col_ctrl2:
                     speed = st.select_slider("播放速度 (Speed)", options=["慢 (Slow)", "中 (Normal)", "快 (Fast)"], value="中 (Normal)")
-                    sleep_time = {"慢 (Slow)": 0.5, "中 (Normal)": 0.2, "快 (Fast)": 0.05}[speed]
+                    # Optimized speeds
+                    sleep_time = {"慢 (Slow)": 0.5, "中 (Normal)": 0.1, "快 (Fast)": 0.01}[speed]
                 
                 with col_ctrl3:
                     if st.session_state.is_playing:
-                        progress_bar = st.progress(0)
+                        st.progress(st.session_state.current_time_index / (len(time_steps) - 1) if len(time_steps) > 1 else 1.0)
                     else:
                         selected_time_idx = st.slider(
                             "时间轴 (Timeline)", 0, len(time_steps)-1, st.session_state.current_time_index,
                             format="%d"
                         )
                         st.session_state.current_time_index = selected_time_idx
-                
-                if st.session_state.is_playing:
-                    placeholder = st.empty()
-                    for i in range(st.session_state.current_time_index, len(time_steps)):
-                        if not st.session_state.is_playing: break 
-                        
-                        curr_time = time_steps[i]
-                        st.session_state.current_time_index = i
-                        
-                        subset_df = sorted_df.loc[sorted_df['create_date'] <= curr_time, ['user_id', 'amount']]
-                        if not subset_df.empty:
-                            user_snapshot = subset_df.groupby('user_id')['amount'].agg(
-                                cum_bet=lambda x: abs(x[x < 0].sum()),
-                                cum_pnl='sum'
-                            ).reset_index()
-                            user_snapshot['status'] = user_snapshot['cum_pnl'].apply(lambda x: 'Winner (赢)' if x > 0 else 'Loser (输)')
-                            
-                            fig_snap = px.scatter(
-                                user_snapshot, 
-                                x='cum_bet', y='cum_pnl', color='status',
-                                color_discrete_map={'Winner (赢)': '#E74C3C', 'Loser (输)': '#2ECC71'},
-                                title=f"时刻: {curr_time.strftime('%Y-%m-%d %H:%M')}",
-                                range_x=[0, max(total_turnover * 0.1, user_snapshot['cum_bet'].max() * 1.1)],
-                                range_y=[user_snapshot['cum_pnl'].min() * 1.1, user_snapshot['cum_pnl'].max() * 1.1]
-                            )
-                            placeholder.plotly_chart(fig_snap, use_container_width=True)
-                        
-                        time.sleep(sleep_time)
-                    st.session_state.is_playing = False
-                    st.rerun()
-                else:
-                    curr_time = time_steps[st.session_state.current_time_index] if len(time_steps) > 0 else min_time
-                    st.caption(f"当前选定时刻: **{curr_time.strftime('%Y-%m-%d %H:%M')}**")
-                    
-                    subset_df = sorted_df.loc[sorted_df['create_date'] <= curr_time, ['user_id', 'amount']]
+
+                placeholder = st.empty()
+
+                def plot_snapshot(curr_time):
+                    # 优化性能: Use searchsorted for O(logN) slicing
+                    idx = sorted_df['create_date'].searchsorted(curr_time, side='right')
+                    subset_df = sorted_df.iloc[:idx]
+
                     if not subset_df.empty:
                         user_snapshot = subset_df.groupby('user_id')['amount'].agg(
                             cum_bet=lambda x: abs(x[x < 0].sum()),
@@ -460,12 +474,35 @@ else:
                             user_snapshot, 
                             x='cum_bet', y='cum_pnl', color='status',
                             color_discrete_map={'Winner (赢)': '#E74C3C', 'Loser (输)': '#2ECC71'},
-                            title=f"玩家盈亏分布 @ {curr_time.strftime('%Y-%m-%d %H:%M')}",
+                            title=f"时刻: {curr_time.strftime('%Y-%m-%d %H:%M')}",
                             labels={'cum_bet': '累计下注', 'cum_pnl': '累计盈亏'},
-                             range_x=[0, max(total_turnover * 0.1, user_snapshot['cum_bet'].max() * 1.1)],
-                             range_y=[user_snapshot['cum_pnl'].min() * 1.1, user_snapshot['cum_pnl'].max() * 1.1]
+                            range_x=[0, max_bet_all],
+                            range_y=[min_pnl_all, max_pnl_all]
                         )
-                        st.plotly_chart(fig_snap, use_container_width=True)
+                        return fig_snap
+                    return None
+
+                if st.session_state.is_playing:
+                    for i in range(st.session_state.current_time_index, len(time_steps)):
+                        if not st.session_state.is_playing: break 
+                        
+                        st.session_state.current_time_index = i
+                        fig = plot_snapshot(time_steps[i])
+                        if fig:
+                            placeholder.plotly_chart(fig, use_container_width=True)
+                        
+                        time.sleep(sleep_time)
+                    
+                    st.session_state.is_playing = False
+                    st.rerun()
+                else:
+                    curr_time = time_steps[st.session_state.current_time_index]
+                    st.caption(f"当前选定时刻: **{curr_time.strftime('%Y-%m-%d %H:%M')}**")
+                    fig = plot_snapshot(curr_time)
+                    if fig:
+                        placeholder.plotly_chart(fig, use_container_width=True)
+                    else:
+                         placeholder.info("该时刻暂无数据 (No data at this moment)")
 
                 st.divider()
                 st.subheader("🕵️‍♂️ 单用户深度洞察 (Single User Insight)")
@@ -518,8 +555,13 @@ else:
                         
                         u_df['cumulative_pnl'] = u_df['amount'].cumsum()
                         
+                        # --- 优化 X 轴显示 ---
+                        # 使用局数序号代替时间轴，以跳过空白时间
+                        u_df = u_df.reset_index(drop=True)
+                        u_df['spin_index'] = u_df.index + 1
+                        
                         st.subheader(f"资金与行为曲线 (User Journey)")
-                        st.caption("图中彩色标记点代表**切换游戏 (Game Switch)**。仅在玩家更换游戏时打点。")
+                        st.caption("图中彩色标记点代表**切换游戏 (Game Switch)**。X 轴为游戏局数次序，已跳过非活跃时间。")
                         
                         # 检测 Game Switch 事件
                         u_df['prev_gid'] = u_df['gid'].shift(1)
@@ -527,9 +569,10 @@ else:
                         switch_events = u_df[u_df['gid'] != u_df['prev_gid']].copy()
                         
                         fig_journey = px.line(
-                            u_df, x='create_date', y='cumulative_pnl',
-                            title="累计盈亏 (Cumulative PnL)",
-                            labels={'create_date': '时间', 'cumulative_pnl': '累计盈亏'},
+                            u_df, x='spin_index', y='cumulative_pnl',
+                            title="累计盈亏 (Cumulative PnL) - 按局数展示",
+                            labels={'spin_index': '游戏局数 (Sequence)', 'cumulative_pnl': '累计盈亏', 'create_date': '时间'},
+                            hover_data=['create_date', 'gid', 'amount']
                         )
                         
                         switch_events['gid_str'] = switch_events['gid'].astype(str)
@@ -537,19 +580,24 @@ else:
                         for g_id in switch_events['gid'].unique():
                             g_data = switch_events[switch_events['gid'] == g_id]
                             fig_journey.add_trace(go.Scatter(
-                                x=g_data['create_date'],
+                                x=g_data['spin_index'],
                                 y=g_data['cumulative_pnl'],
                                 mode='markers',
                                 name=f"Game {g_id}", # Legend 显示
                                 marker=dict(size=10, symbol='diamond'),
-                                text=f"Switched to Game {g_id}",
+                                text=g_data['create_date'].dt.strftime('%Y-%m-%d %H:%M:%S') + f" <br>Switched to Game {g_id}",
                                 hoverinfo='text+x+y'
                             ))
 
                         st.plotly_chart(fig_journey, use_container_width=True)
                         
                         if u_df['has_pool'].any():
-                            fig_u_pool = px.line(u_df, x='create_date', y='real_pool', title="个人 Pool 水位 (Personal Pool Trend)", labels={'create_date': '时间', 'real_pool': '水位'})
+                            fig_u_pool = px.line(
+                                u_df, x='spin_index', y='real_pool', 
+                                title="个人 Pool 水位 (Personal Pool Trend)", 
+                                labels={'spin_index': '游戏局数 (Sequence)', 'real_pool': '水位', 'create_date': '时间'},
+                                hover_data=['create_date']
+                            )
                             fig_u_pool.update_traces(line_color='#F39C12')
                             st.plotly_chart(fig_u_pool, use_container_width=True)
 
