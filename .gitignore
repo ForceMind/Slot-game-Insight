@@ -1,0 +1,10 @@
+# Local source data must never be committed.
+/数据/
+
+# Local runtime files
+/.venv/
+/.streamlit/
+/.cache/
+__pycache__/
+*.py[cod]
+.DS_Store
