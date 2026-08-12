@@ -1,25 +1,42 @@
 @echo off
 chcp 65001 >nul
+cd /d "%~dp0"
+
 echo ========================================================
-echo               SlotInsight 启动脚本
+echo                  SlotInsight 启动器
 echo ========================================================
 echo.
 
-echo [1/2] 正在检查并安装依赖库...
-pip install -r requirements.txt
+where python >nul 2>nul
 if %errorlevel% neq 0 (
-    echo.
-    echo [错误] 依赖安装失败。请确保您已安装 Python 并且 pip 已添加到环境变量。
+    echo 未找到 Python 3，请先安装 Python 3 后重试。
     pause
-    exit /b
+    exit /b 1
 )
 
-echo.
-echo [2/2] 正在启动 Streamlit 应用...
-echo 应用启动后会自动打开默认浏览器。
-echo 如需关闭应用，请直接关闭此窗口。
-echo.
+if not exist ".venv\Scripts\python.exe" (
+    echo [1/3] 正在创建本地运行环境...
+    python -m venv .venv
+    if %errorlevel% neq 0 goto :error
+) else (
+    echo [1/3] 本地运行环境已就绪。
+)
 
-streamlit run app.py
+.venv\Scripts\python.exe -c "import streamlit, pandas, plotly, openpyxl, st_aggrid" >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [2/3] 正在安装所需组件，首次启动会稍久...
+    .venv\Scripts\python.exe -m pip install -r requirements.txt
+    if %errorlevel% neq 0 goto :error
+) else (
+    echo [2/3] 所需组件已安装。
+)
 
+echo [3/3] 正在打开数据面板...
+.venv\Scripts\python.exe -m streamlit run app.py --browser.gatherUsageStats=false --server.showEmailPrompt=false
+exit /b 0
+
+:error
+echo.
+echo 启动失败，请保留本窗口中的错误信息。
 pause
+exit /b 1
